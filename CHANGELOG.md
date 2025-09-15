@@ -8,6 +8,13 @@ NOTE: As semantic versioning states all 0.y.z releases can contain breaking chan
 
 We use *breaking :warning:* to mark changes that are not backward compatible (relates only to v0.y.z releases.)
 
+## Unreleased
+
+### Fixed
+
+- Receive: recycle Cap'n Proto remote write peers on timeouts to heal stale connections.
+- [#8254](https://github.com/thanos-io/thanos/issues/8254) Receive: Endless loop of retried replication with capnproto and distributors
+
 ## [v0.40.1](https://github.com/thanos-io/thanos/tree/release-0.40) - 2025 10 28
 
 ### Fixed
