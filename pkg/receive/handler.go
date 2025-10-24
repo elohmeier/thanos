@@ -1031,9 +1031,11 @@ func (h *Handler) sendRemoteWrite(
 			if !alreadyReplicated {
 				h.replications.WithLabelValues(labelError).Inc()
 			}
-			h.peers.markPeerUnavailable(endpointReplica.endpoint)
-			if cerr := h.peers.close(endpointReplica.endpoint); cerr != nil {
-				level.Warn(h.logger).Log("msg", "failed to close peer connection after forward error", "endpoint", endpointReplica.endpoint, "err", cerr)
+			if shouldRecyclePeer(err) {
+				h.peers.markPeerUnavailable(endpointReplica.endpoint)
+				if cerr := h.peers.close(endpointReplica.endpoint); cerr != nil {
+					level.Warn(h.logger).Log("msg", "failed to close peer connection after forward error", "endpoint", endpointReplica.endpoint, "err", cerr)
+				}
 			}
 		}
 		wg.Done()
@@ -1143,6 +1145,34 @@ func isLabelsConflictErr(err error) bool {
 	return err == labelpb.ErrDuplicateLabels ||
 		err == labelpb.ErrEmptyLabels ||
 		err == labelpb.ErrOutOfOrderLabels
+}
+
+// shouldRecyclePeer returns whether the peer connection should be recycled after a forward error.
+func shouldRecyclePeer(err error) bool {
+	if err == nil {
+		return false
+	}
+	cause := errors.Cause(err)
+	if isConflict(cause) {
+		return false
+	}
+	if errors.Is(cause, errUnavailable) {
+		return true
+	}
+	switch status.Code(cause) {
+	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded:
+		return true
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return true
+	}
+	if writecapnp.ShouldReconnect(cause) {
+		return true
+	}
+	if errors.Is(cause, io.EOF) {
+		return true
+	}
+	return false
 }
 
 // isNotReady returns whether or not the given error represents a not ready error.

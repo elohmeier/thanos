@@ -124,7 +124,7 @@ func (r *RemoteWriteClient) connect(ctx context.Context) error {
 	if err := writer.Resolve(ctx); err != nil {
 		level.Warn(r.logger).Log("msg", "failed to bootstrap capnp writer, closing connection", "err", err)
 		r.closeUnlocked()
-		return errors.Wrap(err, "failed to bootstrap capnp writer")
+		return pkgerrors.Wrap(err, "failed to bootstrap capnp writer")
 	}
 
 	r.writer = writer
@@ -146,11 +146,15 @@ func (r *RemoteWriteClient) closeUnlocked() {
 	}
 }
 
-func shouldReconnect(err error) bool {
+// ShouldReconnect reports whether a remote write error should trigger a reconnect.
+func ShouldReconnect(err error) bool {
 	if err == nil {
 		return false
 	}
 	if capnp.IsDisconnected(err) {
+		return true
+	}
+	if errors.Is(err, rpc.ErrConnClosed) {
 		return true
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -169,4 +173,8 @@ func shouldReconnect(err error) bool {
 		}
 	}
 	return false
+}
+
+func shouldReconnect(err error) bool {
+	return ShouldReconnect(err)
 }

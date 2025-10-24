@@ -1010,7 +1010,7 @@ func TestHandlerReceiveHTTP(t *testing.T) {
 	benchmarkHandlerMultiTSDBReceiveRemoteWrite(testutil.NewTB(t))
 }
 
-func TestSendRemoteWriteMarksPeerUnavailableOnAnyError(t *testing.T) {
+func TestSendRemoteWriteRecyclesPeerOnTransportError(t *testing.T) {
 	t.Parallel()
 
 	h := NewHandler(log.NewNopLogger(), &Options{
@@ -1047,6 +1047,45 @@ func TestSendRemoteWriteMarksPeerUnavailableOnAnyError(t *testing.T) {
 
 	testutil.Equals(t, []Endpoint{endpoint}, stubPeers.markUnavailable)
 	testutil.Equals(t, []Endpoint{endpoint}, stubPeers.closed)
+}
+
+func TestSendRemoteWriteDoesNotRecyclePeerOnConflict(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler(log.NewNopLogger(), &Options{
+		Writer:            NewWriter(log.NewNopLogger(), newFakeTenantAppendable(&fakeAppendable{appender: newFakeAppender(nil, nil, nil)}), &WriterOptions{}),
+		ForwardTimeout:    time.Second,
+		ReplicationFactor: 1,
+		Limiter:           mustNewLimiter(t),
+	})
+
+	endpoint := Endpoint{Address: "addr-b", CapNProtoAddress: "addr-b"}
+	stubPeers := &stubPeersGroup{
+		client: &stubAsyncClient{err: storage.ErrDuplicateSampleForTimestamp},
+	}
+
+	h.peers = stubPeers
+
+	responses := make(chan writeResponse, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h.sendRemoteWrite(ctx, "tenant-b", endpointReplica{
+		endpoint: endpoint,
+		replica:  0,
+	}, trackedSeries{
+		seriesIDs:  []int{0},
+		timeSeries: []prompb.TimeSeries{{}},
+	}, false, responses, &wg)
+
+	wg.Wait()
+	close(responses)
+
+	testutil.Equals(t, 0, len(stubPeers.markUnavailable))
+	testutil.Equals(t, 0, len(stubPeers.closed))
 }
 
 type stubPeersGroup struct {
