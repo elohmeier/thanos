@@ -787,6 +787,14 @@ func (h *Handler) fanoutForward(ctx context.Context, params remoteWriteParams) (
 		return stats, err
 	}
 
+	pendingEndpoints := make(map[endpointReplica]int, len(localWrites)+len(remoteWrites))
+	for er, tenantSeries := range localWrites {
+		pendingEndpoints[er] = len(tenantSeries)
+	}
+	for er, tenantSeries := range remoteWrites {
+		pendingEndpoints[er] = len(tenantSeries) + pendingEndpoints[er]
+	}
+
 	stats = h.gatherWriteStats(len(params.replicas), localWrites, remoteWrites)
 
 	// Prepare a buffered channel to receive the responses from the local and remote writes. Remote writes will all go
@@ -830,13 +838,28 @@ func (h *Handler) fanoutForward(ctx context.Context, params remoteWriteParams) (
 	for {
 		select {
 		case <-ctx.Done():
-			return stats, ctx.Err()
+			if len(pendingEndpoints) == 0 {
+				return stats, ctx.Err()
+			}
+			endpoints := make([]string, 0, len(pendingEndpoints))
+			for er := range pendingEndpoints {
+				endpoints = append(endpoints, fmt.Sprintf("%s (replica=%d)", er.endpoint, er.replica))
+			}
+			slices.Sort(endpoints)
+			return stats, errors.Wrapf(ctx.Err(), "forward requests still pending for endpoints: %s", strings.Join(endpoints, ", "))
 		case resp, hasMore := <-responses:
 			if !hasMore {
 				for _, seriesErr := range seriesErrs {
 					writeErrors.Add(seriesErr)
 				}
 				return stats, writeErrors.ErrOrNil()
+			}
+			if pendingCount, ok := pendingEndpoints[resp.er]; ok {
+				if pendingCount <= 1 {
+					delete(pendingEndpoints, resp.er)
+				} else {
+					pendingEndpoints[resp.er] = pendingCount - 1
+				}
 			}
 
 			if resp.err != nil {

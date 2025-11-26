@@ -6,6 +6,7 @@ package writecapnp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -47,6 +48,10 @@ func (t TCPDialer) Dial() (net.Conn, error) {
 	return conn, nil
 }
 
+func (t TCPDialer) String() string {
+	return t.address
+}
+
 type RemoteWriteClient struct {
 	mu sync.Mutex
 
@@ -55,12 +60,14 @@ type RemoteWriteClient struct {
 
 	writer Writer
 	logger log.Logger
+	target string
 }
 
 func NewRemoteWriteClient(dialer Dialer, logger log.Logger) *RemoteWriteClient {
 	return &RemoteWriteClient{
 		dialer: dialer,
 		logger: logger,
+		target: describeDialer(dialer),
 	}
 }
 
@@ -85,7 +92,7 @@ func (r *RemoteWriteClient) writeWithReconnect(ctx context.Context, numReconnect
 	s, err := result.Struct()
 	if err != nil {
 		if numReconnects > 0 && shouldReconnect(err) {
-			level.Warn(r.logger).Log("msg", "rpc failed, reconnecting")
+			level.Warn(r.logger).Log("msg", "rpc failed, reconnecting", "endpoint", r.target)
 			if err := r.Close(); err != nil {
 				return nil, err
 			}
@@ -122,13 +129,20 @@ func (r *RemoteWriteClient) connect(ctx context.Context) error {
 	r.conn = rpc.NewConn(rpc.NewPackedStreamTransport(conn), nil)
 	writer := Writer(r.conn.Bootstrap(ctx))
 	if err := writer.Resolve(ctx); err != nil {
-		level.Warn(r.logger).Log("msg", "failed to bootstrap capnp writer, closing connection", "err", err)
+		level.Warn(r.logger).Log("msg", "failed to bootstrap capnp writer, closing connection", "endpoint", r.target, "err", err)
 		r.closeUnlocked()
 		return pkgerrors.Wrap(err, "failed to bootstrap capnp writer")
 	}
 
 	r.writer = writer
 	return nil
+}
+
+func describeDialer(d Dialer) string {
+	if stringer, ok := d.(fmt.Stringer); ok {
+		return stringer.String()
+	}
+	return ""
 }
 
 func (r *RemoteWriteClient) Close() error {
