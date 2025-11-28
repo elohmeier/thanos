@@ -11,17 +11,22 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/thanos-io/thanos/pkg/store/labelpb"
+	"strings"
 )
+
+const sampleErrorExampleLimit = 5
 
 type writeErrorTracker struct {
 	numLabelsOutOfOrder int
 	numLabelsDuplicates int
 	numLabelsEmpty      int
 
-	numSamplesOutOfOrder  int
-	numSamplesDuplicates  int
-	numSamplesOutOfBounds int
-	numSamplesTooOld      int
+	numSamplesOutOfOrder     int
+	numSamplesDuplicates     int
+	numSamplesOutOfBounds    int
+	numSamplesTooOld         int
+	sampleOutOfOrderExamples []string
+	sampleDuplicateExamples  []string
 
 	numExemplarsOutOfOrder  int
 	numExemplarsDuplicate   int
@@ -48,6 +53,15 @@ func (a *writeErrorTracker) addLabelsError(err error, lset *labelpb.ZLabelSet, l
 	}
 }
 
+func (a *writeErrorTracker) addSampleSeriesExample(target *[]string, lset labels.Labels) {
+	if len(*target) >= sampleErrorExampleLimit {
+		return
+	}
+
+	// Record string representation to avoid retaining references to incoming labels slices.
+	*target = append(*target, lset.String())
+}
+
 func (a *writeErrorTracker) addSampleError(err error, tLogger log.Logger, lset labels.Labels, t int64, v float64) {
 	if err == nil {
 		return
@@ -56,9 +70,11 @@ func (a *writeErrorTracker) addSampleError(err error, tLogger log.Logger, lset l
 	switch {
 	case errors.Is(err, storage.ErrOutOfOrderSample):
 		a.numSamplesOutOfOrder++
+		a.addSampleSeriesExample(&a.sampleOutOfOrderExamples, lset)
 		level.Debug(tLogger).Log("msg", "Out of order sample", "lset", lset, "value", v, "timestamp", t)
 	case errors.Is(err, storage.ErrDuplicateSampleForTimestamp):
 		a.numSamplesDuplicates++
+		a.addSampleSeriesExample(&a.sampleDuplicateExamples, lset)
 		level.Debug(tLogger).Log("msg", "Duplicate sample for timestamp", "lset", lset, "value", v, "timestamp", t)
 	case errors.Is(err, storage.ErrOutOfBounds):
 		a.numSamplesOutOfBounds++
@@ -80,9 +96,11 @@ func (a *writeErrorTracker) addHistogramError(err error, tLogger log.Logger, lse
 	switch {
 	case errors.Is(err, storage.ErrOutOfOrderSample):
 		a.numSamplesOutOfOrder++
+		a.addSampleSeriesExample(&a.sampleOutOfOrderExamples, lset)
 		level.Debug(tLogger).Log("msg", "Out of order histogram", "lset", lset, "timestamp", timestamp)
 	case errors.Is(err, storage.ErrDuplicateSampleForTimestamp):
 		a.numSamplesDuplicates++
+		a.addSampleSeriesExample(&a.sampleDuplicateExamples, lset)
 		level.Debug(tLogger).Log("msg", "Duplicate histogram for timestamp", "lset", lset, "timestamp", timestamp)
 	case errors.Is(err, storage.ErrOutOfBounds):
 		a.numSamplesOutOfBounds++
@@ -131,11 +149,19 @@ func (a *writeErrorTracker) collectErrors(tLogger log.Logger) writeErrors {
 	}
 
 	if a.numSamplesOutOfOrder > 0 {
-		level.Warn(tLogger).Log("msg", "Error on ingesting out-of-order samples", "numDropped", a.numSamplesOutOfOrder)
+		level.Warn(tLogger).Log(
+			"msg", "Error on ingesting out-of-order samples",
+			"numDropped", a.numSamplesOutOfOrder,
+			"seriesExamples", strings.Join(a.sampleOutOfOrderExamples, "; "),
+		)
 		errs.Add(errors.Wrapf(storage.ErrOutOfOrderSample, "add %d samples", a.numSamplesOutOfOrder))
 	}
 	if a.numSamplesDuplicates > 0 {
-		level.Warn(tLogger).Log("msg", "Error on ingesting samples with different value but same timestamp", "numDropped", a.numSamplesDuplicates)
+		level.Warn(tLogger).Log(
+			"msg", "Error on ingesting samples with different value but same timestamp",
+			"numDropped", a.numSamplesDuplicates,
+			"seriesExamples", strings.Join(a.sampleDuplicateExamples, "; "),
+		)
 		errs.Add(errors.Wrapf(storage.ErrDuplicateSampleForTimestamp, "add %d samples", a.numSamplesDuplicates))
 	}
 	if a.numSamplesOutOfBounds > 0 {

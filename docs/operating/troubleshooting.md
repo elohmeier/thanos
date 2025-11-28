@@ -134,6 +134,7 @@ level=warn ts=2021-05-01T05:02:23.596022921Z caller=writer.go:92 component=recei
 
 ### Diagnostic
 
+- Recent warnings in the receiver logs include a `seriesExamples` field (up to 5 label sets) for out-of-order or duplicate-timestamp errors; this is often enough to spot which Prometheus instance is clashing.
 - Enable debug log on Thanos Receiver (you may need to update cli parameter or helm chart values, depending on how you deployed Thanos Receiver). You can inspect the label set of the out-of-order sample in the debug log of Thanos Receiver, it may provide you some insight.
 - Inspect the topology and configuration of your Prometheus deployment, see if they match the above possible causes.
 
