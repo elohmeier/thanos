@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -314,13 +315,13 @@ func (s *ProxyStore) Series(originalRequest *storepb.SeriesRequest, seriesSrv st
 	level.Debug(s.logger).Log("msg", "Tenant info in Series()", "tenant", tenant)
 
 	// There are no stores registered at all and partial results are disabled, return an error.
-	stores := s.stores()
-	if len(stores) == 0 && (originalRequest.PartialResponseDisabled || originalRequest.PartialResponseStrategy == storepb.PartialResponseStrategy_ABORT) {
+	allStores := s.stores()
+	if len(allStores) == 0 && (originalRequest.PartialResponseDisabled || originalRequest.PartialResponseStrategy == storepb.PartialResponseStrategy_ABORT) {
 		level.Debug(reqLogger).Log("err", ErrorNoStoresAvailable)
 		return ErrorNoStoresAvailable
 	}
 
-	stores, storeLabelSets, storeDebugMsgs := s.matchingStores(ctx, stores, originalRequest.MinTime, originalRequest.MaxTime, matchers)
+	stores, storeDebugMsgs := s.matchingStores(ctx, allStores, originalRequest.MinTime, originalRequest.MaxTime, matchers)
 	if len(stores) == 0 {
 		level.Debug(reqLogger).Log("err", ErrorNoStoresMatched, "stores", strings.Join(storeDebugMsgs, ";"))
 		return nil
@@ -331,7 +332,7 @@ func (s *ProxyStore) Series(originalRequest *storepb.SeriesRequest, seriesSrv st
 		MinTime:                 originalRequest.MinTime,
 		MaxTime:                 originalRequest.MaxTime,
 		Limit:                   originalRequest.Limit,
-		Matchers:                append(storeMatchers, MatchersForLabelSets(storeLabelSets)...),
+		Matchers:                storeMatchers,
 		Aggregates:              originalRequest.Aggregates,
 		MaxResolutionWindow:     originalRequest.MaxResolutionWindow,
 		SkipChunks:              originalRequest.SkipChunks,
@@ -365,7 +366,11 @@ func (s *ProxyStore) Series(originalRequest *storepb.SeriesRequest, seriesSrv st
 			}
 		}
 
-		respSet, err := newAsyncRespSet(ctx, st, r, s.responseTimeout, s.retrievalStrategy, &s.buffers, r.ShardInfo, reqLogger, s.metrics.emptyStreamResponses, s.lazyRetrievalMaxBufferedResponses, reporter)
+		// Each store must receive only its own selector restrictions. In particular,
+		// another store's external labels may be ordinary series labels here.
+		storeRequest := *r
+		storeRequest.Matchers = st.withMatchers(r.Matchers)
+		respSet, err := newAsyncRespSet(ctx, st.Client, &storeRequest, s.responseTimeout, s.retrievalStrategy, &s.buffers, r.ShardInfo, reqLogger, s.metrics.emptyStreamResponses, s.lazyRetrievalMaxBufferedResponses, reporter)
 		if err != nil {
 			level.Error(reqLogger).Log("err", err)
 
@@ -449,7 +454,7 @@ func (s *ProxyStore) LabelNames(ctx context.Context, originalRequest *storepb.La
 	ctx = metadata.AppendToOutgoingContext(ctx, tenancy.DefaultTenantHeader, tenant)
 	level.Debug(s.logger).Log("msg", "Tenant info in LabelNames()", "tenant", tenant)
 
-	stores, storeLabelSets, storeDebugMsgs := s.matchingStores(ctx, s.stores(), originalRequest.Start, originalRequest.End, matchers)
+	stores, storeDebugMsgs := s.matchingStores(ctx, s.stores(), originalRequest.Start, originalRequest.End, matchers)
 	if len(stores) == 0 {
 		level.Debug(reqLogger).Log("err", ErrorNoStoresMatched, "stores", strings.Join(storeDebugMsgs, ";"))
 		return &storepb.LabelNamesResponse{}, nil
@@ -460,7 +465,7 @@ func (s *ProxyStore) LabelNames(ctx context.Context, originalRequest *storepb.La
 		PartialResponseStrategy: originalRequest.PartialResponseStrategy,
 		Start:                   originalRequest.Start,
 		End:                     originalRequest.End,
-		Matchers:                append(storeMatchers, MatchersForLabelSets(storeLabelSets)...),
+		Matchers:                storeMatchers,
 		WithoutReplicaLabels:    originalRequest.WithoutReplicaLabels,
 		Hints:                   originalRequest.Hints,
 	}
@@ -473,7 +478,9 @@ func (s *ProxyStore) LabelNames(ctx context.Context, originalRequest *storepb.La
 	)
 	for _, st := range stores {
 		g.Go(func() error {
-			resp, err := st.LabelNames(gctx, r)
+			storeRequest := *r
+			storeRequest.Matchers = st.withMatchers(r.Matchers)
+			resp, err := st.LabelNames(gctx, &storeRequest)
 			if err != nil {
 				err = errors.Wrapf(err, "fetch label names from store %s", st)
 				if r.PartialResponseDisabled || r.PartialResponseStrategy == storepb.PartialResponseStrategy_ABORT {
@@ -544,7 +551,7 @@ func (s *ProxyStore) LabelValues(ctx context.Context, originalRequest *storepb.L
 	ctx = metadata.AppendToOutgoingContext(ctx, tenancy.DefaultTenantHeader, tenant)
 	level.Debug(reqLogger).Log("msg", "Tenant info in LabelValues()", "tenant", tenant)
 
-	stores, storeLabelSets, storeDebugMsgs := s.matchingStores(ctx, s.stores(), originalRequest.Start, originalRequest.End, matchers)
+	stores, storeDebugMsgs := s.matchingStores(ctx, s.stores(), originalRequest.Start, originalRequest.End, matchers)
 	if len(stores) == 0 {
 		level.Debug(reqLogger).Log("err", ErrorNoStoresMatched, "stores", strings.Join(storeDebugMsgs, ";"))
 		return &storepb.LabelValuesResponse{}, nil
@@ -556,7 +563,7 @@ func (s *ProxyStore) LabelValues(ctx context.Context, originalRequest *storepb.L
 		PartialResponseStrategy: originalRequest.PartialResponseStrategy,
 		Start:                   originalRequest.Start,
 		End:                     originalRequest.End,
-		Matchers:                append(storeMatchers, MatchersForLabelSets(storeLabelSets)...),
+		Matchers:                storeMatchers,
 		WithoutReplicaLabels:    originalRequest.WithoutReplicaLabels,
 		Limit:                   originalRequest.Limit,
 	}
@@ -569,7 +576,9 @@ func (s *ProxyStore) LabelValues(ctx context.Context, originalRequest *storepb.L
 	)
 	for _, st := range stores {
 		g.Go(func() error {
-			resp, err := st.LabelValues(gctx, r)
+			storeRequest := *r
+			storeRequest.Matchers = st.withMatchers(r.Matchers)
+			resp, err := st.LabelValues(gctx, &storeRequest)
 			if err != nil {
 				err = errors.Wrapf(err, "fetch label values from store %s", st)
 				if r.PartialResponseDisabled || r.PartialResponseStrategy == storepb.PartialResponseStrategy_ABORT {
@@ -613,14 +622,18 @@ func storeInfo(st Client) (storeID string, storeAddr string) {
 	return storeID, storeAddr
 }
 
+// selectStore reports whether st matches the TSDBSelector and returns its selected label sets.
+// Keep restrictions even when all advertised label sets match: a store may have
+// added an excluded TSDB since its metadata was last refreshed.
+func (s *ProxyStore) selectStore(st Client) (bool, []labels.Labels) {
+	return s.tsdbSelector.MatchLabelSets(st.LabelSets()...)
+}
+
 // storesForTSDBSelector returns stores that match the TSDBSelector filtering criteria.
-// This centralizes the TSDBSelector filtering logic used across all ProxyStore methods
-// for cases where we don't need additional matchers or time range filtering.
 func (s *ProxyStore) storesForTSDBSelector(stores []Client) []Client {
 	var filteredStores []Client
 	for _, st := range stores {
-		matches, _ := s.tsdbSelector.MatchLabelSets(st.LabelSets()...)
-		if matches {
+		if matches, _ := s.selectStore(st); matches {
 			filteredStores = append(filteredStores, st)
 		}
 	}
@@ -629,13 +642,29 @@ func (s *ProxyStore) storesForTSDBSelector(stores []Client) []Client {
 
 // TODO: consider moving the following functions into something like "pkg/pruneutils" since it is also used for exemplars.
 
-func (s *ProxyStore) matchingStores(ctx context.Context, allStores []Client, minTime, maxTime int64, matchers []*labels.Matcher) ([]Client, []labels.Labels, []string) {
+// matchedStore keeps selector restrictions scoped to the store advertising them.
+type matchedStore struct {
+	Client
+	matchers []storepb.LabelMatcher
+}
+
+func (st matchedStore) withMatchers(matchers []storepb.LabelMatcher) []storepb.LabelMatcher {
+	if len(st.matchers) == 0 {
+		return matchers
+	}
+	return slices.Concat(matchers, st.matchers)
+}
+
+func (s *ProxyStore) matchingStores(ctx context.Context, allStores []Client, minTime, maxTime int64, matchers []*labels.Matcher) ([]matchedStore, []string) {
 	var (
-		stores         []Client
-		storeLabelSets []labels.Labels
+		stores         []matchedStore
 		storeDebugMsgs []string
 	)
-	for _, st := range s.storesForTSDBSelector(allStores) {
+	for _, st := range allStores {
+		matches, selectedLabelSets := s.selectStore(st)
+		if !matches {
+			continue
+		}
 		// We might be able to skip the store if its meta information indicates it cannot have series matching our query.
 		if ok, reason := storeMatches(ctx, s.debugLogging, st, minTime, maxTime, matchers...); !ok {
 			if s.debugLogging {
@@ -643,17 +672,23 @@ func (s *ProxyStore) matchingStores(ctx context.Context, allStores []Client, min
 			}
 			continue
 		}
-		// Since we already filtered by TSDBSelector in filteredStores(), we just need to get the extra matchers
-		_, extraMatchers := s.tsdbSelector.MatchLabelSets(st.LabelSets()...)
-		storeLabelSets = append(storeLabelSets, extraMatchers...)
-
-		stores = append(stores, st)
+		var selectorMatchers []storepb.LabelMatcher
+		if selectedLabelSets != nil {
+			if !LabelSetsMatch(matchers, selectedLabelSets...) {
+				if s.debugLogging {
+					storeDebugMsgs = append(storeDebugMsgs, fmt.Sprintf("Store %s filtered out due to: selected label sets %v do not match request label matchers: %v", st, selectedLabelSets, matchers))
+				}
+				continue
+			}
+			selectorMatchers = MatchersForLabelSets(selectedLabelSets)
+		}
+		stores = append(stores, matchedStore{Client: st, matchers: selectorMatchers})
 		if s.debugLogging {
 			storeDebugMsgs = append(storeDebugMsgs, fmt.Sprintf("Store %s queried", st))
 		}
 	}
 
-	return stores, storeLabelSets, storeDebugMsgs
+	return stores, storeDebugMsgs
 }
 
 // storeMatches returns boolean if the given store may hold data for the given label matchers, time ranges and debug store matches gathered from context.
